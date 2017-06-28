@@ -1,10 +1,15 @@
-﻿#include "AnimalBodyReader.h"
+#include "AnimalBodyReader.h"
 #include "..\BBLib\BBWinUtils.h"
 #include "..\BBLib\BBUnitsConv.h"
 #include <list>
 #include <math.h>
+#include <iostream>
+#include <fstream>
+#include <time.h>
 
-
+static int xPositionPreviousDog = 0;
+static int xPositionPreviousRobot = 0;
+static float pixelsInCantemeters = 0;
 
 AnimalBodyReader::AnimalBodyReader()
 {
@@ -19,8 +24,28 @@ AnimalBodyReader::AnimalBodyReader()
 	_lastUsedFrameTime = 0;
 }
 
+const std::string currentDateTime() {
+	time_t     now = time(0);
+	struct tm  tstruct;
+	char       buf[80];
+	tstruct = *localtime(&now);
+	// Visit http://en.cppreference.com/w/cpp/chrono/c/strftime
+	// for more information about date/time format
+	strftime(buf, sizeof(buf), "%Y-%m-%d.%X", &tstruct);
+
+	return buf;
+}
+
 int AnimalBodyReader::StartVideo()
 {
+	std::ofstream log("statistics.txt", std::ios_base::app | std::ios_base::out);
+	if (log.is_open())
+	{
+		log << "Time                   Distance          Back/Forward" << std::endl;
+		log.close();
+	}
+	else cout << "Unable to open file";
+
 	if (_config.readFromLiveStream) {
 		if (!_capture.open(_config.deviceId)) {
 			return 1;
@@ -49,7 +74,7 @@ int AnimalBodyReader::StartVideo()
 	// use camera height and HFOV to convert pixels to cm
 	double horViewInCm = tan(BB_DEG_2_RAD(_config.HFOV / 2.0)) * _config.height * 2.0;
 	_postureAnalyzer.SetPixelsInCm(_frameWidth / horViewInCm);
-
+	pixelsInCantemeters = _frameWidth / horViewInCm;
 	//start an infinite loop where webcam feed is copied to cameraFeed matrix
 	//all of our operations will be performed within this loop
 	waitKey(500);
@@ -60,15 +85,10 @@ int AnimalBodyReader::StartVideo()
 int AnimalBodyReader::HandleVideoFrame()
 {
 	static Mat dst, detected_edges, src, src_gray;
-	static int delayMs = 5000 / _fps;
-	Mat blurred, threshold, frame, canny_output;
-	int min = 0, max = 1000;
-	int thresh = 100;
-	std::vector<cv::Mat> contours;
-	std::vector<cv::Vec4i> hierarchy;
+	static int delayMs = 1000 / _fps;
 
 	clock_t now = clock();
-	int msSinceLastUsedFrame = int(double(now - _lastUsedFrameTime) / CLOCKS_PER_SEC * 1000.0);
+	int msSinceLastUsedFrame = int(double(now - _lastUsedFrameTime) / CLOCKS_PER_SEC * 5000.0);
 	
 	// store image to matrix
 	if (!_capture.read(_cameraFeed)) {
@@ -81,11 +101,6 @@ int AnimalBodyReader::HandleVideoFrame()
 			return 2;
 		}
 	}
-	char mainWindow[] = "Main";
-	char countoursOutput[] = "COutput";
-	//char thresholdWindow[] = "Threshold";
-	//namedWindow(mainWindow, 0);
-	//namedWindow(thresholdWindow, 0);
 
 	if (msSinceLastUsedFrame >= _config.frameInterval)
 	{
@@ -95,140 +110,44 @@ int AnimalBodyReader::HandleVideoFrame()
 
 		//convert frame from BGR to HSV colorspace
 		cvtColor(_cameraFeed, _HSV, COLOR_BGR2HSV);
-		// find all white pixel and set alpha value to zero:
-		for (int y = 0; y < _HSV.rows; ++y)
-			for (int x = 0; x < _HSV.cols; ++x)
-			{
-				cv::Vec4b & pixel = _HSV.at<cv::Vec4b>(y, x);
-				// if pixel is white
-				if (pixel[0] == 255 && pixel[1] == 255 && pixel[2] == 255)
-				{
-					// set alpha to zero:
-					pixel[3] = 0;
-				}
-			}
-		GaussianBlur(_HSV, _HSVGBlur, Size(5,5),0,0);
-		medianBlur(_HSVGBlur, _HSVMedianBlur, 21);
-
-		//Search of objects with Canny algorithm
-		//Canny(_HSV, canny_output, thresh, thresh * 2, 3);
-		//Canny(_HSVGBlur, canny_output, thresh, thresh * 2, 3);
-		Canny(_HSVMedianBlur, canny_output, thresh, thresh * 2, 3);
-
-		/* поиск контуров */
-		findContours(canny_output, contours, hierarchy, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE, Point(0, 0));
-		
-		/// Get the moments
-		vector<Moments> mu(contours.size());
-		for (int i = 0; i < contours.size(); i++)
-		{
-			mu[i] = moments(contours[i], false);
-		}
-
-		/// Calculate the area with the moments 00 and compare with the result of the OpenCV function
-		printf("\t Info: Area and Contour Length \n");
-		for (int i = 0; i < contours.size(); i++)
-		{
-			printf(" * Contour[%d] - Area (M_00) = %.2f - Area OpenCV: %.2f - Length: %.2f \n", i, mu[i].m00, contourArea(contours[i]), arcLength(contours[i], true));
-			if (mu[i].m00<50)  contours.erase(contours.begin() +i);
-		}
-	    
-
-		
-		
-		for (int i = 0; i< contours.size(); i++) {
-			cv::Mat iCountur = contours.at(i);
-			//cv::Size mSize=iCountur.size();
-			//int myArea = mSize.area;
-			//printf(iCountur.size());
-			double areac = contourArea(iCountur);
-			printf("Video frame size: %d", areac);
-		}
-
-		/// отрисовка контуров
-		Mat drawing = Mat::zeros(canny_output.size(), CV_8UC3);
-		for (int i = 0; i< contours.size(); i++) {
-			Scalar color = Scalar(255, 200, 20);
-			drawContours(drawing, contours, i, color, 2, 8, hierarchy, 0, Point());
-		}
-
-		/* показ результата в отдельном окне */
-		namedWindow(countoursOutput, CV_WINDOW_AUTOSIZE);
-		imshow(countoursOutput, drawing);
-
-
-
-
-		////Finding objects by countur
-		////medianBlur(_HSV, blurred, 21);
-		//for (int y = 0; y < _cameraFeed.rows; y++) {
-		//	for (int x = 0; x < _cameraFeed.cols; x++) {
-		//		int value = _cameraFeed.at<uchar>(y, x);
-		//		if (value == 0) {
-		//			Rect rect;
-		//			//int count = floodFill(threshold, Point(x, y), Scalar(200), &rect);
-		//			//if (rect.width >= min && rect.width <= max
-		//			//	&& rect.height >= min && rect.height <= max) {
-		//				rectangle(_HSV, rect, Scalar(255, 0, 255, 4));
-
-		//			//}
-		//		}
-		//	}
-		//}
-		//imshow(mainWindow, _HSV);
-
-
-
-
-
-
-
-
-
-
-
-
-		//imshow(thresholdWindow, threshold);
-		//imshow("Output", frame);
-		//imshow("Output", threshold);
 
 		// search for stickers
-		//for (unsigned int i = 0; i < _stickers.size(); i++) {
-		//	if (_stickers[i].minHSV[0] <= _stickers[i].maxHSV[0]) {
-		//		inRange(_HSV, _stickers[i].minHSV, _stickers[i].maxHSV, _threshold1);
-		//	}
-		//	else {
-		//		// red -> two ranges
-		//		Scalar minHSV, maxHSV;
-		//		// lower range
-		//		minHSV = _stickers[i].minHSV; minHSV[0] = 0;
-		//		maxHSV = _stickers[i].maxHSV;
-		//		inRange(_HSV, minHSV, maxHSV, _threshold1);
-		//		// upper range
-		//		minHSV = _stickers[i].minHSV;
-		//		maxHSV = _stickers[i].maxHSV; maxHSV[0] = 179;
-		//		inRange(_HSV, minHSV, maxHSV, _threshold2);
-		//		// combine the two ranges
-		//		_threshold1 |= _threshold2;
-		//	}
-		//	MorphOps(_threshold1);
-		//	FindObjectsForSticker(i);
-		//}
+		for (unsigned int i = 0; i < _stickers.size(); i++) {
+			if (_stickers[i].minHSV[0] <= _stickers[i].maxHSV[0]) {
+				inRange(_HSV, _stickers[i].minHSV, _stickers[i].maxHSV, _threshold1);
+			}
+			else {
+				// red -> two ranges
+				Scalar minHSV, maxHSV;
+				// lower range
+				minHSV = _stickers[i].minHSV; minHSV[0] = 0;
+				maxHSV = _stickers[i].maxHSV;
+				inRange(_HSV, minHSV, maxHSV, _threshold1);
+				// upper range
+				minHSV = _stickers[i].minHSV;
+				maxHSV = _stickers[i].maxHSV; maxHSV[0] = 179;
+				inRange(_HSV, minHSV, maxHSV, _threshold2);
+				// combine the two ranges
+				_threshold1 |= _threshold2;
+			}
+			MorphOps(_threshold1);
+			FindObjectsForSticker(i);
+		}
 
-		//GetBodyPositionFromStickers();
+		GetBodyPositionFromStickers();
 
-		//_postureAnalyzer.CalculateBodyPosture(_body);
-		//_postureAnalyzer.GetPosture(_posture);
-		//char postureText[200];
-		//_postureAnalyzer.GetPostureText(_posture, postureText);
-		//char timeStr[30];
-		//BBUtGetTimeStr(timeStr, 30, ':', TRUE);
-		//printf("%s %s\n", timeStr, postureText);
+		_postureAnalyzer.CalculateBodyPosture(_body);
+		_postureAnalyzer.GetPosture(_posture);
+		char postureText[200];
+		_postureAnalyzer.GetPostureText(_posture, postureText);
+		char timeStr[30];
+		BBUtGetTimeStr(timeStr, 30, ':', TRUE);
+		printf("%s %s\n", timeStr, postureText);
 
-		//DrawBodyLines();
-		//for (unsigned int i = 0; i < _stickers.size(); i++) {
-		//	DrawSticker(i);
-		//}
+		DrawBodyLines();
+		for (unsigned int i = 0; i < _stickers.size(); i++) {
+			DrawSticker(i);
+		}
 
 		imshow("Output", _cameraFeed);
 	}
@@ -249,7 +168,6 @@ int AnimalBodyReader::HandleVideoFrame()
 
 	return 0;
 }
-
 
 void AnimalBodyReader::FindObjectsForSticker(int stickerIndex)
 {
@@ -334,7 +252,6 @@ void AnimalBodyReader::DrawObject(Object &obj)
 	}
 }
 
-
 void AnimalBodyReader::DrawSticker(int stickerIndex)
 {
 	for (unsigned int i = 0; i < _stickers[stickerIndex].objects.size(); i++)
@@ -343,9 +260,10 @@ void AnimalBodyReader::DrawSticker(int stickerIndex)
 	}
 }
 
-
 void AnimalBodyReader::DrawBodyLines()
 {
+	int xPosDog = 0;
+	int xPosRobot = 0;
 	if (_body.back.IsVisible() && _body.neck.IsVisible()) {
 		cv::line(_cameraFeed, 
 			Point(_body.neck.pObject->xPos, _body.neck.pObject->yPos),
@@ -354,12 +272,24 @@ void AnimalBodyReader::DrawBodyLines()
 	}
 	else if (_body.back.IsVisible() && _body.head.IsVisible()) {
 		// if neck is not visible but head is then draw line from back to head
+		if (_body.head.pObject != NULL && _body.back.pObject != NULL)
+		{
+			xPosDog = _body.back.pObject->xPos;
+			xPosRobot = _body.head.pObject->xPos;
+		}
+
 		cv::line(_cameraFeed,
 			Point(_body.head.pObject->xPos, _body.head.pObject->yPos),
 			Point(_body.back.pObject->xPos, _body.back.pObject->yPos),
 			_body.back.pObject->color, 1);
 	}
 	if (_body.neck.IsVisible() && _body.head.IsVisible()) {
+		// if neck is visible but head is then draw line from neck to head
+		if (_body.head.pObject != NULL && _body.neck.pObject != NULL)
+		{
+			xPosDog = _body.neck.pObject->xPos;
+			xPosRobot = _body.head.pObject->xPos;
+		}
 		cv::line(_cameraFeed,
 			Point(_body.head.pObject->xPos, _body.head.pObject->yPos),
 			Point(_body.neck.pObject->xPos, _body.neck.pObject->yPos),
@@ -371,8 +301,26 @@ void AnimalBodyReader::DrawBodyLines()
 			Point(_body.back.pObject->xPos, _body.back.pObject->yPos),
 			_body.tail.pObject->color, 1);
 	}
-}
 
+	if (xPosDog !=  0 && xPosRobot != 0)
+	{ 
+		std::ofstream log("statistics.txt", std::ios_base::app | std::ios_base::out);
+		if (log.is_open())
+		{
+			string backStatus = "";
+			//TESTING DISTANCE
+			//if (xPositionPrevious < yPositionPrevious && abs(xPosDog - xPosRobot) <= abs(xPositionPrevious - yPositionPrevious))
+			if ((xPositionPreviousDog < xPositionPreviousRobot && xPositionPreviousDog<= xPosDog) || (xPositionPreviousDog > xPositionPreviousRobot && xPositionPreviousDog >= xPosDog))
+				backStatus = "closer";
+			else backStatus = "away";
+			log << currentDateTime() <<"    " <<abs(xPosDog - xPosRobot) / pixelsInCantemeters << " cantimeters    " << backStatus << std::endl;
+			log.close();
+		}
+		else cout << "Unable to open file";
+		xPositionPreviousDog = xPosDog;
+		xPositionPreviousRobot = xPosRobot;
+	}
+}
 
 void AnimalBodyReader::MorphOps(Mat &thresh)
 {
@@ -388,7 +336,6 @@ void AnimalBodyReader::MorphOps(Mat &thresh)
 	dilate(thresh, thresh, dilateElement);
 	dilate(thresh, thresh, dilateElement);
 }
-
 
 void AnimalBodyReader::GetBodyPositionFromStickers()
 {
@@ -425,12 +372,14 @@ void AnimalBodyReader::GetBodyPositionFromStickers()
 		_body.tail.pObject = NULL;
 	}
 
+
+
 	// TODO: read leg positions
 }
 
-
 int AnimalBodyReader::ReadConfig(string filename)
 {
+
 	int nRc = 0, i, valInt;
 	char valStr[50] = "";
 	//double valdouble;
@@ -609,7 +558,6 @@ int AnimalBodyReader::ReadConfig(string filename)
 	return NO_ERROR;
 }
 
-
 Sticker *AnimalBodyReader::GetStickerPtrByName(char *name)
 {
 	for (unsigned int i = 0; i < _stickers.size(); i++)
@@ -620,7 +568,6 @@ Sticker *AnimalBodyReader::GetStickerPtrByName(char *name)
 	}
 	return NULL;
 }
-
 
 string AnimalBodyReader::IntToString(int num)
 {
